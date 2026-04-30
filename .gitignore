@@ -1,0 +1,30 @@
+# Terraform - NUNCA subir estos archivos
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+.terraform/
+tfplan.binary
+tfplan.json
+*.tfvars
+!*.tfvars.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Auditor outputs
+audit_report.json
+anonymization_mapping.json
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp
