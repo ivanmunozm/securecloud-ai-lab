@@ -32,15 +32,6 @@ jobs:
         with:
           terraform_version: "~1.9"
 
-      - name: Cache Terraform providers
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.terraform.d/plugin-cache
-            terraform/environments/lab/.terraform
-          key: ${{ runner.os }}-tf-${{ hashFiles('terraform/**/.terraform.lock.hcl') }}
-          restore-keys: ${{ runner.os }}-tf-
-
       - name: Set Terraform plugin cache dir
         run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
 
@@ -92,42 +83,45 @@ jobs:
             }
 
             const blocked = report.block_merge;
-            const icon = blocked ? '🔴' : '✅';
-            const status = blocked ? 'MERGE BLOQUEADO' : 'APROBADO';
             const findings = report.findings || [];
-
-            const findingRows = findings.map(f => {
-              const sev = f.severity;
-              const emoji = sev === 'CRITICAL' ? '🔴' : sev === 'HIGH' ? '🟠' : sev === 'MEDIUM' ? '🟡' : '⚪';
-              return `| ${emoji} ${sev} | \`${f.resource}\` | ${f.description} |`;
-            }).join('\n');
-
             const meta = report._meta || {};
+
+            const severityEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '⚪' };
+            const rows = findings.map(f =>
+              '| ' + (severityEmoji[f.severity] || '') + ' ' + f.severity +
+              ' | `' + f.resource + '` | ' + f.description + ' |'
+            ).join('\n');
+
             const cost = meta.input_tokens
-              ? `$${((meta.input_tokens * 3 + meta.output_tokens * 15) / 1_000_000).toFixed(5)}`
+              ? '$' + ((meta.input_tokens * 3 + meta.output_tokens * 15) / 1000000).toFixed(5)
               : 'N/A';
 
-            const body = `## ${icon} SecureCloud-AI Audit — ${status}
+            const table = findings.length > 0
+              ? '| Severity | Resource | Issue |\n|----------|----------|-------|\n' + rows
+              : '_No se encontraron hallazgos._';
 
-**Risk level:** \`${report.overall_risk}\`
-${report.summary ? `**Summary:** ${report.summary}` : ''}
+            const footer = blocked
+              ? '> Resuelve los hallazgos antes de hacer merge.'
+              : '> Sin hallazgos bloqueantes. Procede con la revision normal.';
 
-${findings.length > 0 ? `| Severity | Resource | Issue |
-|----------|----------|-------|
-${findingRows}` : '_No se encontraron hallazgos._'}
-
-<details>
-<summary>Metadata de la auditoría</summary>
-
-- **Tokens:** ${meta.input_tokens || 0} in / ${meta.output_tokens || 0} out / ${meta.cache_read_tokens || 0} cached
-- **Costo estimado:** ${cost}
-- **Modelo:** ${meta.model || 'N/A'}
-- **Cambios analizados:** ${JSON.stringify(meta.changes_analyzed || {})}
-</details>
-
-${blocked
-  ? '> ❌ Resuelve los hallazgos antes de hacer merge.'
-  : '> ✅ Sin hallazgos bloqueantes. Procede con la revisión normal.'}`;
+            const body = [
+              '## ' + (blocked ? '🔴 MERGE BLOQUEADO' : '✅ APROBADO') + ' — SecureCloud-AI Audit',
+              '',
+              '**Risk level:** `' + report.overall_risk + '`',
+              report.summary ? '**Summary:** ' + report.summary : '',
+              '',
+              table,
+              '',
+              '<details>',
+              '<summary>Metadata de la auditoria</summary>',
+              '',
+              '- **Tokens:** ' + (meta.input_tokens || 0) + ' in / ' + (meta.output_tokens || 0) + ' out',
+              '- **Costo estimado:** ' + cost,
+              '- **Modelo:** ' + (meta.model || 'N/A'),
+              '</details>',
+              '',
+              footer
+            ].join('\n');
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
