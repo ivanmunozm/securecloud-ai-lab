@@ -1,0 +1,143 @@
+name: Terraform Security Audit — SecureCloud-AI
+
+on:
+  pull_request:
+    paths:
+      - 'terraform/**/*.tf'
+      - 'terraform/**/*.tfvars'
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  terraform-audit:
+    name: AI Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_AUDIT_ROLE_ARN }}
+          role-session-name: securecloud-ai-audit-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            terraform/environments/lab/.terraform
+          key: ${{ runner.os }}-tf-${{ hashFiles('terraform/**/.terraform.lock.hcl') }}
+          restore-keys: ${{ runner.os }}-tf-
+
+      - name: Set Terraform plugin cache dir
+        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        working-directory: terraform/environments/lab
+        run: terraform init -backend=false
+
+      - name: Generate Terraform Plan JSON
+        working-directory: terraform/environments/lab
+        run: |
+          terraform plan \
+            -var="aws_region=us-east-1" \
+            -var="github_repo=${{ github.repository }}" \
+            -var="s3_bucket_name=securecloud-lab-${{ github.actor }}" \
+            -out=tfplan.binary
+          terraform show -json tfplan.binary > tfplan.json
+          echo "Plan generado: $(wc -c < tfplan.json) bytes"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: auditor/requirements.txt
+
+      - name: Install auditor dependencies
+        run: pip install -r auditor/requirements.txt
+
+      - name: Run AI Security Audit
+        id: ai-audit
+        working-directory: auditor
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python gatekeeper.py ../terraform/environments/lab/tfplan.json lab
+        continue-on-error: true
+
+      - name: Post audit report as PR comment
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync('auditor/audit_report.json', 'utf8'));
+            } catch (e) {
+              report = { overall_risk: 'ERROR', findings: [], summary: 'No se pudo leer el reporte.' };
+            }
+
+            const blocked = report.block_merge;
+            const icon = blocked ? '🔴' : '✅';
+            const status = blocked ? 'MERGE BLOQUEADO' : 'APROBADO';
+            const findings = report.findings || [];
+
+            const findingRows = findings.map(f => {
+              const sev = f.severity;
+              const emoji = sev === 'CRITICAL' ? '🔴' : sev === 'HIGH' ? '🟠' : sev === 'MEDIUM' ? '🟡' : '⚪';
+              return `| ${emoji} ${sev} | \`${f.resource}\` | ${f.description} |`;
+            }).join('\n');
+
+            const meta = report._meta || {};
+            const cost = meta.input_tokens
+              ? `$${((meta.input_tokens * 3 + meta.output_tokens * 15) / 1_000_000).toFixed(5)}`
+              : 'N/A';
+
+            const body = `## ${icon} SecureCloud-AI Audit — ${status}
+
+**Risk level:** \`${report.overall_risk}\`
+${report.summary ? `**Summary:** ${report.summary}` : ''}
+
+${findings.length > 0 ? `| Severity | Resource | Issue |
+|----------|----------|-------|
+${findingRows}` : '_No se encontraron hallazgos._'}
+
+<details>
+<summary>Metadata de la auditoría</summary>
+
+- **Tokens:** ${meta.input_tokens || 0} in / ${meta.output_tokens || 0} out / ${meta.cache_read_tokens || 0} cached
+- **Costo estimado:** ${cost}
+- **Modelo:** ${meta.model || 'N/A'}
+- **Cambios analizados:** ${JSON.stringify(meta.changes_analyzed || {})}
+</details>
+
+${blocked
+  ? '> ❌ Resuelve los hallazgos antes de hacer merge.'
+  : '> ✅ Sin hallazgos bloqueantes. Procede con la revisión normal.'}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Enforce security gate
+        if: steps.ai-audit.outcome == 'failure'
+        run: |
+          echo "Security audit detected blocking issues."
+          exit 1

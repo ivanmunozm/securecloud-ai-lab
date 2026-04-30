@@ -1,0 +1,15 @@
+gatekeeper:
+  block_on_severities:
+    - CRITICAL
+    - HIGH
+  block_on_error: true
+
+compliance_standards:
+  - CIS_AWS_Benchmark_v3
+  - OWASP_Top10_LLMs_2025
+
+environments:
+  lab:
+    block_on_severities: [CRITICAL]
+  production:
+    block_on_severities: [CRITICAL, HIGH]
