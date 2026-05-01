@@ -10,7 +10,6 @@ terraform {
 
 provider "aws" {
   region  = var.aws_region
-  profile = "securecloud-lab"
 }
 
 module "github_oidc" {
