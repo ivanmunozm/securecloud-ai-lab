@@ -1,4 +1,4 @@
-name: Terraform Security Audit — SecureCloud-AI
+name: Terraform Security Audit
 
 on:
   pull_request:
@@ -32,9 +32,6 @@ jobs:
         with:
           terraform_version: "~1.9"
 
-      - name: Set Terraform plugin cache dir
-        run: echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
-
       - name: Terraform Init
         working-directory: terraform/environments/lab
         run: terraform init -backend=false
@@ -48,14 +45,11 @@ jobs:
             -var="s3_bucket_name=securecloud-lab-${{ github.actor }}" \
             -out=tfplan.binary
           terraform show -json tfplan.binary > tfplan.json
-          echo "Plan generado: $(wc -c < tfplan.json) bytes"
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: auditor/requirements.txt
 
       - name: Install auditor dependencies
         run: pip install -r auditor/requirements.txt
@@ -65,8 +59,7 @@ jobs:
         working-directory: auditor
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          python gatekeeper.py ../terraform/environments/lab/tfplan.json lab
+        run: python gatekeeper.py ../terraform/environments/lab/tfplan.json lab
         continue-on-error: true
 
       - name: Post audit report as PR comment
@@ -79,50 +72,19 @@ jobs:
             try {
               report = JSON.parse(fs.readFileSync('auditor/audit_report.json', 'utf8'));
             } catch (e) {
-              report = { overall_risk: 'ERROR', findings: [], summary: 'No se pudo leer el reporte.' };
+              report = { overall_risk: 'ERROR', findings: [], summary: 'Error leyendo reporte.' };
             }
-
             const blocked = report.block_merge;
             const findings = report.findings || [];
             const meta = report._meta || {};
-
-            const severityEmoji = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '⚪' };
-            const rows = findings.map(f =>
-              '| ' + (severityEmoji[f.severity] || '') + ' ' + f.severity +
-              ' | `' + f.resource + '` | ' + f.description + ' |'
-            ).join('\n');
-
-            const cost = meta.input_tokens
-              ? '$' + ((meta.input_tokens * 3 + meta.output_tokens * 15) / 1000000).toFixed(5)
-              : 'N/A';
-
-            const table = findings.length > 0
-              ? '| Severity | Resource | Issue |\n|----------|----------|-------|\n' + rows
-              : '_No se encontraron hallazgos._';
-
-            const footer = blocked
-              ? '> Resuelve los hallazgos antes de hacer merge.'
-              : '> Sin hallazgos bloqueantes. Procede con la revision normal.';
-
-            const body = [
-              '## ' + (blocked ? '🔴 MERGE BLOQUEADO' : '✅ APROBADO') + ' — SecureCloud-AI Audit',
-              '',
-              '**Risk level:** `' + report.overall_risk + '`',
-              report.summary ? '**Summary:** ' + report.summary : '',
-              '',
-              table,
-              '',
-              '<details>',
-              '<summary>Metadata de la auditoria</summary>',
-              '',
-              '- **Tokens:** ' + (meta.input_tokens || 0) + ' in / ' + (meta.output_tokens || 0) + ' out',
-              '- **Costo estimado:** ' + cost,
-              '- **Modelo:** ' + (meta.model || 'N/A'),
-              '</details>',
-              '',
-              footer
-            ].join('\n');
-
+            const icons = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '⚪' };
+            const rows = findings.map(f => '| ' + icons[f.severity] + ' ' + f.severity + ' | `' + f.resource + '` | ' + f.description + ' |').join('\n');
+            const table = findings.length > 0 ? '| Severity | Resource | Issue |\n|---|---|---|\n' + rows : 'Sin hallazgos.';
+            const cost = meta.input_tokens ? '$' + ((meta.input_tokens * 3 + meta.output_tokens * 15) / 1000000).toFixed(5) : 'N/A';
+            const body = '## ' + (blocked ? '🔴 BLOQUEADO' : '✅ APROBADO') + ' — SecureCloud-AI\n\n' +
+              'Risk: `' + report.overall_risk + '`\n\n' +
+              table + '\n\n' +
+              'Tokens: ' + (meta.input_tokens || 0) + ' in / ' + (meta.output_tokens || 0) + ' out | Costo: ' + cost;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -132,6 +94,4 @@ jobs:
 
       - name: Enforce security gate
         if: steps.ai-audit.outcome == 'failure'
-        run: |
-          echo "Security audit detected blocking issues."
-          exit 1
+        run: exit 1
